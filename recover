@@ -1,0 +1,73 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+# Rebind only the SP6 IPTS host client after its mode ioctl fails.
+set -euo pipefail
+client=0000:00:16.4-3e8d0870-271a-4208-8eb5-9acb9402ae04
+sys=/sys/bus/mei/devices/$client
+drv=/sys/bus/mei/drivers/ipts
+exec 9>/run/lock/ipts-sp6-recovery.lock
+flock -n 9 || exit 0
+[[ $(readlink -f "$sys/driver") == "$drv" ]] || exit 1
+shopt -s nullglob
+nodes=("$sys"/0000:045E:001F.*/hidraw/hidraw*)
+[[ ${#nodes[@]} == 1 ]] || exit 1
+unit=iptsd@dev-${nodes[0]##*/}.service
+if [[ ${1:-} != --force ]]; then
+    # Do not let an old mode failure trigger recovery of a later unrelated error.
+    invocation=$(systemctl show --value --property=InvocationID "$unit")
+    if [[ ! $invocation =~ ^[[:xdigit:]]{32}$ ]] || ! journalctl -b \
+        "_SYSTEMD_INVOCATION_ID=$invocation" --no-pager -o cat |
+        grep -E 'IOCTL 3221374982 failed: (Resource temporarily unavailable|No such device)' >/dev/null; then
+        echo "IPTS recovery skipped: no qualifying mode ioctl failure in $unit invocation $invocation"
+        exit 0
+    fi
+fi
+reconnect() {
+    local bound
+    [[ -d $sys ]] || return 1
+    bound=$(readlink -f "$sys/driver" || true)
+    if [[ -L $sys/driver ]]; then
+        [[ $bound == "$drv" ]] || return 1
+        printf '%s' "$client" > "$drv/unbind" || return 1
+    fi
+    # If a prior bind failed, the next attempt starts with the client unbound.
+    printf '%s' "$client" > "$drv/bind" || return 1
+    udevadm settle --timeout=10 || echo 'udev queue did not settle; checking the IPTS endpoint directly'
+}
+stop_daemon() {
+    local state
+    state=$(systemctl show --value --property=ActiveState "$unit" 2>/dev/null || true)
+    # Old instances may disappear after an unbind; this must not block rebinding.
+    case $state in inactive|failed|'') return 0 ;; esac
+    systemctl stop "$unit"
+}
+for attempt in 1 2 3; do
+    echo "IPTS SP6 recovery attempt $attempt: rebinding $client"
+    if ! stop_daemon || ! reconnect; then
+        echo "IPTS client reconnect failed in attempt $attempt"
+        continue
+    fi
+    nodes=("$sys"/0000:045E:001F.*/hidraw/hidraw*)
+    [[ ${#nodes[@]} == 1 ]] || continue
+    dev=/dev/${nodes[0]##*/}
+    unit=iptsd@dev-${nodes[0]##*/}.service
+    systemctl reset-failed "$unit" || true
+    systemctl start --no-block "$unit"
+    # Observation interval for the ~1-3s ioctl; this is not a boot readiness delay.
+    sleep 4
+    if systemctl is-active --quiet "$unit" && /usr/lib/ipts-sp6-workaround/hid-active "$dev"; then
+        echo "IPTS SP6 recovered: $unit is running with an active HID endpoint and corrected descriptor"
+        exit 0
+    fi
+done
+echo "IPTS SP6 recovery exhausted; restoring fallback event mode"
+# Avoid re-launch while restoring fallback; preserve an existing runtime mask.
+mask=/run/systemd/system/iptsd@.service
+if [[ ! -L $mask || $(readlink "$mask") != /dev/null ]]; then
+    systemctl mask --runtime iptsd@.service
+    trap 'systemctl unmask --runtime iptsd@.service' EXIT
+fi
+if ! stop_daemon || ! reconnect; then
+    echo 'Fallback restoration failed; IPTS may require manual client binding'
+fi
+exit 1

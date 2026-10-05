@@ -1,0 +1,51 @@
+Subject: [PATCH 1/2] mei: bus: restore nonblocking receive for callback consumers
+
+MEI RX work notifications may coalesce when multiple messages complete
+before the client callback runs. A callback that consumes messages needs
+to drain the ready queue without waiting indefinitely on its final read.
+
+Restore the nonblocking receive entry point, now needed by the IPTS client.
+It uses the existing __mei_cl_recv() nonblocking path. This preserves the
+current device lock, completion queue and ordinary-client flow control.
+No existing API behavior changes and no vtag variant is needed by IPTS.
+
+The API was removed as unused in commit 10d43ecbb012 ("mei: Remove unused
+functions"). This is a new caller, not a regression caused by that removal:
+IPTS used a single blocking read before and after that commit.
+
+---
+diff --git a/drivers/misc/mei/bus.c b/drivers/misc/mei/bus.c
+--- a/drivers/misc/mei/bus.c
++++ b/drivers/misc/mei/bus.c
+@@ -418,6 +418,20 @@
+ EXPORT_SYMBOL_GPL(mei_cldev_recv);
+ 
+ /**
++ * mei_cldev_recv_nonblock - receive a pending client message without waiting
++ * @cldev: MEI client device
++ * @buf: buffer to receive
++ * @length: buffer length
++ *
++ * Return: bytes received, -EAGAIN if no message is pending, or another error.
++ */
++ssize_t mei_cldev_recv_nonblock(struct mei_cl_device *cldev, u8 *buf, size_t length)
++{
++	return __mei_cl_recv(cldev->cl, buf, length, NULL, MEI_CL_IO_RX_NONBLOCK, 0);
++}
++EXPORT_SYMBOL_GPL(mei_cldev_recv_nonblock);
++
++/**
+  * mei_cl_bus_rx_work - dispatch rx event for a bus device
+  *
+  * @work: work
+diff --git a/include/linux/mei_cl_bus.h b/include/linux/mei_cl_bus.h
+--- a/include/linux/mei_cl_bus.h
++++ b/include/linux/mei_cl_bus.h
+@@ -97,6 +97,7 @@
+ ssize_t mei_cldev_send_timeout(struct mei_cl_device *cldev, const u8 *buf,
+ 			       size_t length, unsigned long timeout);
+ ssize_t mei_cldev_recv(struct mei_cl_device *cldev, u8 *buf, size_t length);
++ssize_t mei_cldev_recv_nonblock(struct mei_cl_device *cldev, u8 *buf, size_t length);
+ ssize_t mei_cldev_recv_timeout(struct mei_cl_device *cldev, u8 *buf, size_t length,
+ 			       unsigned long timeout);
+ ssize_t mei_cldev_send_vtag(struct mei_cl_device *cldev, const u8 *buf,

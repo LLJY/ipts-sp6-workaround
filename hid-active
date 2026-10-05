@@ -1,0 +1,16 @@
+#!/usr/bin/python
+# HIDIOCGFEATURE succeeds only when the IPTS low-level HID endpoint is enabled.
+# The installed EDS1 driver returns zero bytes, so do not interpret the mode byte.
+import os,sys,fcntl
+from pathlib import Path
+try:
+    fd=os.open(sys.argv[1],os.O_RDWR|os.O_NONBLOCK)
+    fcntl.ioctl(fd,0xC0024807,bytearray((0x42,0)),True)
+    os.close(fd)
+    descriptor=(Path('/sys/class/hidraw') / Path(sys.argv[1]).name /
+                'device/report_descriptor').read_bytes()
+    if len(descriptor) != 96 or descriptor[63:65] != bytes((0x85,0x41)) or \
+       descriptor[77:80] != bytes((0x96,0x3a,0x1d)):
+        sys.exit(1)
+except OSError:
+    sys.exit(1)

@@ -1,0 +1,35 @@
+Subject: [PATCH] HID: ipts: correct the EDS1 raw report descriptor size
+
+The EDS1 fallback descriptor defines a two-byte scan time followed by
+7485 bytes of constant data for report 0x41. Including the report ID,
+this describes a 7488-byte report. However, ipts_resources_init()
+allocates 7485 bytes and ipts_hid_input_data() submits 7485 bytes.
+
+HID core now checks the supplied buffer size and rejects every raw
+report with -EINVAL before it reaches hidraw. On a Surface Pro 6 the
+warning reports 7487 expected payload bytes versus 7484 available.
+Older HID core padded the mismatch, potentially beyond the allocation.
+
+Set the constant data count to 7482, accounting for the two scan-time
+bytes and report ID. This matches the existing allocation and wire
+format without changing payload offsets or the userspace protocol.
+Native EDS2 descriptors are unaffected.
+
+Tested on a Surface Pro 6 (045E:001F) with 7.2.9 using an equivalent
+one-byte HID-BPF descriptor correction: raw reports changed from
+-EINVAL to success, iptsd 3.1.0 received data, and simultaneous contact
+slots were recorded. No iptsd configuration changes were required.
+
+---
+diff --git a/drivers/hid/ipts/desc.h b/drivers/hid/ipts/desc.h
+--- a/drivers/hid/ipts/desc.h
++++ b/drivers/hid/ipts/desc.h
+@@ -66,7 +66,7 @@
+ 	0x81, 0x02,	  /*      Input (Variable),              */
+ 	0x09, 0x61,	  /*      Usage (Gesture Char Quality),  */
+ 	0x75, 0x08,	  /*      Report Size (8),               */
+-	0x96, 0x3D, 0x1D, /*      Report Count (7485),           */
++	0x96, 0x3A, 0x1D, /*      Report Count (7482),           */
+ 	0x81, 0x03,	  /*      Input (Constant, Variable),    */
+ 	0x85, 0x42,	  /*      Report ID (66),                */
+ 	0x06, 0x00, 0xFF, /*      Usage Page (FF00h),            */

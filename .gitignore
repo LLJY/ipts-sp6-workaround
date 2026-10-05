@@ -1,0 +1,11 @@
+/src/
+/pkg/
+/vmlinux.h
+*.o
+*.ko
+*.pkg.tar.*
+*.src.tar.*
+*.log
+__pycache__/
+/logs/
+/reports/

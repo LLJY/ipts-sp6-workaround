@@ -1,0 +1,89 @@
+Subject: [PATCH 2/2] HID: ipts: drain MEI responses on each receive notification
+
+The IPTS receive callback consumes one response per work execution. For
+the Surface Pro 6 fixed-address MEI client, firmware may send the pending
+READY_FOR_DATA and QUIESCE_IO responses in one interrupt batch. Both
+completions schedule the same RX work, so the second notification can
+coalesce. The callback reads READY_FOR_DATA and strands QUIESCE_IO in
+MEI's FIFO. The flush wait then expires despite an on-time firmware reply.
+
+The later GET_DEVICE_INFO reply schedules a callback which consumes the
+old QUIESCE_IO completion. GET_DEVICE_INFO remains queued and its wait
+also expires, propagating -EAGAIN through the mode feature ioctl.
+
+Drain all pending responses with nonblocking receive, stopping on -EAGAIN.
+A redundant queued callback also exits promptly when the queue is empty.
+Free the unused entry on empty/error exit. Keep firmware status handling,
+command matching, waiter notification and transport locking unchanged.
+
+On Surface Pro 6, a one-shot 3ms delay in the RFD hardware read batches
+shutdown replies: the original driver loses the second RX notification,
+then receives old QUIESCE when GET_DEVICE_INFO arrives. A diagnostic
+bounded-time drain variant processes both replies and completes the mode
+switch under the same injection. The nonblocking API avoids the diagnostic
+variant's final 1ms empty-read wait.
+
+---
+diff --git a/drivers/hid/ipts/mei.c b/drivers/hid/ipts/mei.c
+--- a/drivers/hid/ipts/mei.c
++++ b/drivers/hid/ipts/mei.c
+@@ -40,38 +40,36 @@
+ 	struct ipts_context *ipts = NULL;
+ 
+ 	if (!cldev) {
+-		pr_err("MEI device is NULL!");
++		pr_err("MEI device is NULL!\n");
+ 		return;
+ 	}
+ 
+ 	ipts = mei_cldev_get_drvdata(cldev);
+ 	if (!ipts) {
+-		pr_err("IPTS driver context is NULL!");
++		pr_err("IPTS driver context is NULL!\n");
+ 		return;
+ 	}
+ 
+-	entry = devm_kzalloc(ipts->dev, sizeof(*entry), GFP_KERNEL);
+-	if (!entry)
+-		return;
+-
+-	INIT_LIST_HEAD(&entry->list);
+-
+-	do {
+-		ret = mei_cldev_recv(cldev, (u8 *)&entry->rsp, sizeof(entry->rsp));
+-	} while (ret == -EINTR);
+-
+-	if (ret < 0) {
+-		dev_err(ipts->dev, "Error while reading response: %ld\n", ret);
+-		return;
++	for (;;) {
++		entry = devm_kzalloc(ipts->dev, sizeof(*entry), GFP_KERNEL);
++		if (!entry)
++			return;
++		INIT_LIST_HEAD(&entry->list);
++		do {
++			ret = mei_cldev_recv_nonblock(cldev, (u8 *)&entry->rsp,
++						      sizeof(entry->rsp));
++		} while (ret == -EINTR);
++		if (ret <= 0) {
++			devm_kfree(ipts->dev, entry);
++			if (ret < 0 && ret != -EAGAIN)
++				dev_err(ipts->dev, "Error while reading response: %ld\n", ret);
++			else if (ret == 0)
++				dev_err(ipts->dev, "Received empty response\n");
++			return;
++		}
++		locked_list_add(&entry->list, &ipts->mei.messages, &ipts->mei.message_lock);
++		wake_up_all(&ipts->mei.message_queue);
+ 	}
+-
+-	if (ret == 0) {
+-		dev_err(ipts->dev, "Received empty response\n");
+-		return;
+-	}
+-
+-	locked_list_add(&entry->list, &ipts->mei.messages, &ipts->mei.message_lock);
+-	wake_up_all(&ipts->mei.message_queue);
+ }
+ 
+ static int ipts_mei_search(struct ipts_mei *mei, enum ipts_command_code code,

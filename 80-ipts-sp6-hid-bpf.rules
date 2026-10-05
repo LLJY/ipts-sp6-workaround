@@ -1,0 +1,8 @@
+# Correct the known EDS1 synthetic descriptor only; the BPF probe also checks it.
+ACTION!="add|remove|bind|unbind", GOTO="ipts_sp6_bpf_end"
+SUBSYSTEM!="hid", GOTO="ipts_sp6_bpf_end"
+ENV{MODALIAS}!="hid:b0000g0001v0000045Ep0000001F", GOTO="ipts_sp6_bpf_end"
+ACTION=="add", IMPORT{program}="/usr/bin/udev-hid-bpf add $sys$devpath /usr/lib/ipts-sp6-workaround/0010-Microsoft__IPTS_SP6_ReportSize.bpf.o"
+ACTION=="remove", RUN{program}+="/usr/bin/udev-hid-bpf remove $sys$devpath"
+ACTION=="bind|unbind", IMPORT{program}="/usr/bin/udev-hid-bpf list-loaded --format udev --syspath $sys$devpath"
+LABEL="ipts_sp6_bpf_end"

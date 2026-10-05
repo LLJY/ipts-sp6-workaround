@@ -1,0 +1,9 @@
+[Unit]
+Description=Recover a Surface Pro 6 IPTS mode ioctl failure
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/ipts-sp6-workaround/recover
+TimeoutStartSec=90
